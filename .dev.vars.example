@@ -1,0 +1,8 @@
+# Cloudflare Worker Local Secrets (used by `wrangler dev`)
+# Copy this file to .dev.vars:
+#   cp .dev.vars.example .dev.vars
+#
+# For production deployments, secrets are stored in Cloudflare:
+#   npx wrangler secret put SUPABASE_ANON_KEY
+
+SUPABASE_ANON_KEY="your-supabase-anon-key-here"

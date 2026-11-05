@@ -1,0 +1,27 @@
+name = "amazecc-cache"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "<YOUR_CACHE_KV_NAMESPACE_ID>"
+
+[[routes]]
+pattern = "cache.amazecc.com"
+custom_domain = true
+
+[vars]
+CDN_BASE = "https://cdn.amazecc.com"
+SUPABASE_URL = "https://blfxhlmpvdhcpdwgrffr.supabase.co"
+CACHE_TTL_SECONDS = "3600"
+WP_BASE = "https://chennai.vit.ac.in"
+DIRECTORYCC_BASE = "https://directorycc.vit.ac.in"
+# Public-data proxies (/transport/buses, /fresher/resources). The app calls
+# these without credentials, so the worker is free to cache them campus-wide.
+AMAZECC_API_BASE = "https://api.amazecc.com"
+UNMESSIFY_BASE = "https://kanishka-developer.github.io/unmessify/json/en"
+# Optional. Set with `npx wrangler secret put GITHUB_TOKEN` rather than here:
+# unauthenticated is fine (5-min cache = 12 upstream calls/hour, under the
+# 60/hr limit), a token just gives headroom.
+# GITHUB_TOKEN = ""
