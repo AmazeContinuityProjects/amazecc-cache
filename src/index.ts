@@ -18,7 +18,10 @@
  *   /faculty/roster          cached VIT faculty roster (school, name, employeeId, profileUrl)
  *   /faculty/schools         distinct school list derived from the roster
  *   /faculty/search?q=&school=  filtered roster
- *   /faculty/profile/{id}    combined shape: vitfac review aggregates + directorycc profile + image
+ *   /faculty/combined        vitfac + roster merged catalog (compact, ~500 KB)
+ *   /faculty/profile/{id}    combined shape: vitfac review aggregates + directorycc profile
+ *   /faculty/all-data        complete catalog with ALL shapes merged (vitfac + roster + full directory academic dossier)
+ *   /faculty/all-data/{id}   single faculty full profile with all shapes combined
  *
  * directorycc is frequently down (returns HTTP 500). Every profile fetch is
  * best-effort: on failure we still return whatever vitfac/Supabase has and mark
@@ -36,6 +39,7 @@
  * Those are documented in more detail next to their handlers below.
  */
 import { roster as rosterData } from "./roster";
+import { facultyAllData } from "./allData";
 
 interface Env {
   CACHE: KVNamespace;
@@ -809,6 +813,29 @@ async function handleRoute(url: URL, env: Env, ctx: ExecutionContext): Promise<R
       } catch (err) {
         return json({ error: String(err) }, 502);
       }
+    }
+
+    // ---- all-data catalog (all faculties with complete shapes: directory + vitfac + roster) ----
+    if (url.pathname === "/faculty/all-data" || url.pathname === "/faculty/all-data/") {
+      const cacheKey = "faculty_all_data_v1";
+      const cached = await env.CACHE.get(cacheKey, "json");
+      if (cached) return json({ data: { faculty: cached }, cached: true, source: "kv-cache" });
+      return json({ data: { faculty: facultyAllData }, cached: true, source: "baked-in" });
+    }
+
+    const allDataSingleMatch = url.pathname.match(/^\/faculty\/all-data\/(.+)$/);
+    if (allDataSingleMatch) {
+      const raw = decodeURIComponent(allDataSingleMatch[1]);
+      const empId = /^[0-9]+$/.test(raw) ? raw : (() => { try { return atob(raw).trim(); } catch { return raw; } })();
+      const single = (facultyAllData as readonly any[]).find((f) => f.employeeId === empId);
+      if (single) return json({ data: single, cached: true, source: "baked-in" });
+      const cacheKey = `directory_profile_${empId}_v1`;
+      const cached: any = await env.CACHE.get(cacheKey, "json");
+      if (cached) {
+        const flat = { ...(cached.prof || {}), ...(cached.directory || {}) };
+        return json({ data: flat, cached: true, source: "kv-cache" });
+      }
+      return json({ data: null }, 404);
     }
 
     // ---- combined catalog (all faculties, vitfac-enriched roster) ----

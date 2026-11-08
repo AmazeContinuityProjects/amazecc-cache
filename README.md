@@ -14,9 +14,10 @@ including cached base64 images. Served from `cache.amazecc.com`.
 - `/faculty/roster` — cached VIT faculty roster (`{ data: { faculty: [...] } }`)
 - `/faculty/schools` — distinct school list derived from the roster
 - `/faculty/search?q=&school=` — filtered roster
-- `/faculty/profile/{id}` — combined shape: vitfac review aggregates + directorycc
-  profile (name, designation, email, intercom, image, research areas, education,
-  publications, awards, metrics, links, ...) + `directoryAvailable` flag
+- `/faculty/combined` — vitfac + roster merged catalog (compact ~500 KB payload, ideal for fast app boot)
+- `/faculty/profile/{id}` — combined shape: vitfac review aggregates + directorycc profile (name, designation, email, intercom, research areas, education, publications, awards, metrics, links, ...) + `directoryAvailable` flag
+- `/faculty/all-data` — complete catalog containing ALL 1,235 faculty with ALL shapes merged (vitfac lore/metrics + roster metadata + full directory academic dossiers: publications, education, patents, links, projects, awards)
+- `/faculty/all-data/{id}` — single faculty complete profile with all shapes merged
 
 ### Public data proxies
 
