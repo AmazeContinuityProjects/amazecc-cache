@@ -39,8 +39,8 @@ import { roster as rosterData } from "./roster";
 
 interface Env {
   CACHE: KVNamespace;
-  SUPABASE_URL: string;
-  SUPABASE_ANON_KEY: string;
+  SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
   CACHE_TTL_SECONDS: string;
   WP_BASE?: string;
   DIRECTORYCC_BASE?: string;
@@ -52,26 +52,6 @@ interface Env {
   GITHUB_TOKEN?: string;
   /** Edge CDN origin for images (defaults to https://cdn.amazecc.com). */
   CDN_BASE?: string;
-}
-
-interface FacultyRow {
-  id: number;
-  employee_id: string;
-  name: string;
-  designation: string | null;
-  image_url: string | null;
-  school_page: string | null;
-  campus: string | null;
-}
-
-interface ReviewRow {
-  faculty_id: number;
-  verdict: string | null;
-  score_lecture: number | null;
-  score_da: number | null;
-  score_vibe: number | null;
-  lore_chips: { green?: string[]; red?: string[] } | null;
-  course_code: string | null;
 }
 
 interface VitfacMetrics {
@@ -174,155 +154,28 @@ function toCdnUrl(env: Env, url: string | null | undefined, empId?: string | nul
   );
 }
 
-async function supabaseFetch(env: Env, table: string, select: string, query = ""): Promise<any[]> {
-  const url = `${env.SUPABASE_URL}/rest/v1/${table}?select=${encodeURIComponent(select)}${query}`;
-  const res = await fetch(url, {
-    headers: {
-      apikey: env.SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${env.SUPABASE_ANON_KEY}`,
-    },
-  });
-  if (!res.ok) throw new Error(`Supabase ${table} returned ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
-}
-
-async function fetchAll(env: Env, table: string, select: string, query = ""): Promise<any[]> {
-  const pageSize = 1000;
-  const rows: any[] = [];
-  let offset = 0;
-  while (true) {
-    const page = await supabaseFetch(env, table, select, `${query}&limit=${pageSize}&offset=${offset}`);
-    rows.push(...page);
-    if (page.length < pageSize) break;
-    offset += pageSize;
-  }
-  return rows;
-}
-
-function aggregateReviews(reviews: ReviewRow[]) {
-  const total = reviews.length;
-  const wCount = reviews.filter((r) => String(r.verdict || "").toUpperCase() === "W").length;
-  const lCount = total - wCount;
-  const wPct = total > 0 ? Math.round((wCount / total) * 100) : 0;
-  const avg = (field: "score_lecture" | "score_da" | "score_vibe") =>
-    total > 0 ? reviews.reduce((s, r) => s + (Number(r[field]) || 0), 0) / total : 0;
-  const metrics: VitfacMetrics | undefined =
-    total > 0 ? { lecture: avg("score_lecture"), da: avg("score_da"), vibe: avg("score_vibe") } : undefined;
-
-  const greenCounts = new Map<string, number>();
-  const redCounts = new Map<string, number>();
-  for (const r of reviews) {
-    const chips = r.lore_chips || {};
-    for (const c of chips.green || []) greenCounts.set(c, (greenCounts.get(c) || 0) + 1);
-    for (const c of chips.red || []) redCounts.set(c, (redCounts.get(c) || 0) + 1);
-  }
-  const toLore = (m: Map<string, number>): { text: string; count: number }[] =>
-    Array.from(m.entries()).map(([text, count]) => ({ text, count })).sort((a, b) => b.count - a.count);
-  const green = toLore(greenCounts);
-  const red = toLore(redCounts);
-  const lore = green.length > 0 || red.length > 0 ? { green, red } : undefined;
-  const courses = [...new Set(reviews.map((r) => r.course_code).filter(Boolean))] as string[];
-  return { total, wCount, lCount, wPct, metrics, lore, courses };
-}
-
-async function buildCatalog(env: Env): Promise<VitfacFaculty[]> {
-  const [facultyRows, reviewRows] = await Promise.all([
-    fetchAll(env, "faculty", "id,employee_id,name,designation,image_url,school_page,campus"),
-    fetchAll(env, "reviews", "faculty_id,verdict,score_lecture,score_da,score_vibe,lore_chips,course_code"),
-  ]);
-
-  const reviewsByFaculty = new Map<number, ReviewRow[]>();
-  for (const r of reviewRows as ReviewRow[]) {
-    if (!reviewsByFaculty.has(r.faculty_id)) reviewsByFaculty.set(r.faculty_id, []);
-    reviewsByFaculty.get(r.faculty_id)!.push(r);
-  }
-
-  return (facultyRows as FacultyRow[]).map((f) => {
-    const revs = reviewsByFaculty.get(f.id) || [];
-    const agg = aggregateReviews(revs);
-    return {
-      id: encodeB64(String(f.employee_id)),
-      employeeId: String(f.employee_id),
-      name: f.name,
-      designation: f.designation || undefined,
-      dept: f.school_page || f.campus || undefined,
-      courses: agg.courses,
-      wPct: agg.wPct,
-      reviews: agg.total,
-      wCount: agg.wCount,
-      lCount: agg.lCount,
-      metrics: agg.metrics,
-      lore: agg.lore,
-      image_url: toCdnUrl(env, f.image_url),
-    };
-  });
-}
-
 async function buildProfile(env: Env, empId: string): Promise<any | null> {
-  const fRows = await supabaseFetch(
-    env,
-    "faculty",
-    "id,employee_id,name,designation,image_url,school_page,campus",
-    `&employee_id=eq.${encodeURIComponent(empId)}`
-  );
-  const f = (fRows as FacultyRow[])[0];
+  const cachedList = (await env.CACHE.get("faculty_list_v1", "json")) as VitfacFaculty[] | null;
+  const f = cachedList?.find((item) => item.employeeId === empId || item.id === encodeB64(empId));
   if (!f) return null;
 
-  const reviews = (await supabaseFetch(
-    env,
-    "reviews",
-    "score_lecture,score_da,score_vibe,verdict,lore_chips,course_code",
-    `&faculty_id=eq.${f.id}`
-  )) as ReviewRow[];
-
-  const globalAgg = aggregateReviews(reviews);
-
-  const byCourse = new Map<string, ReviewRow[]>();
-  for (const r of reviews) {
-    const code = r.course_code;
-    if (!code) continue;
-    if (!byCourse.has(code)) byCourse.set(code, []);
-    byCourse.get(code)!.push(r);
-  }
-  const courseStatsCourses = Array.from(byCourse.entries()).map(([code, revs]) => {
-    const agg = aggregateReviews(revs);
-    return {
-      code,
-      name: undefined,
-      reviews: agg.total,
-      wPct: agg.wPct,
-      metrics: agg.metrics,
-      lore: agg.lore,
-    };
-  });
-
-  const prof: VitfacFaculty = {
-    id: encodeB64(String(f.employee_id)),
-    employeeId: String(f.employee_id),
-    name: f.name,
-    designation: f.designation || undefined,
-    dept: f.school_page || f.campus || undefined,
-    courses: globalAgg.courses,
-    wPct: globalAgg.wPct,
-    reviews: globalAgg.total,
-    wCount: globalAgg.wCount,
-    lCount: globalAgg.lCount,
-    metrics: globalAgg.metrics,
-    lore: globalAgg.lore,
-    image_url: toCdnUrl(env, f.image_url),
-  };
-
   return {
-    prof,
+    prof: f,
     courseStats: {
       global: {
-        reviews: globalAgg.total,
-        wPct: globalAgg.wPct,
-        metrics: globalAgg.metrics,
-        lore: globalAgg.lore,
+        reviews: f.reviews,
+        wPct: f.wPct,
+        metrics: f.metrics,
+        lore: f.lore,
       },
-      courses: courseStatsCourses,
+      courses: (f.courses || []).map((code) => ({
+        code,
+        name: undefined,
+        reviews: 0,
+        wPct: f.wPct,
+        metrics: f.metrics,
+        lore: f.lore,
+      })),
     },
   };
 }
@@ -463,33 +316,20 @@ async function fetchDirectoryProfile(empId: string, env: Env): Promise<any | nul
 async function buildCombinedCatalog(env: Env, ctx?: ExecutionContext): Promise<any[]> {
   const roster = await buildRoster(env, ctx);
 
-  // vitfac side (Supabase) — best effort, joined by employee_id
-  let facultyRows: FacultyRow[] = [];
-  let reviewRows: ReviewRow[] = [];
+  let vitfacList: VitfacFaculty[] = [];
   try {
-    [facultyRows, reviewRows] = await Promise.all([
-      fetchAll(env, "faculty", "id,employee_id,name,designation,image_url,school_page,campus"),
-      fetchAll(env, "reviews", "faculty_id,verdict,score_lecture,score_da,score_vibe,lore_chips,course_code"),
-    ]);
+    vitfacList = ((await env.CACHE.get("faculty_list_v1", "json")) as VitfacFaculty[]) || [];
   } catch {
-    // Supabase down — combined catalog degrades to roster-only
+    // ignore
   }
 
-  const reviewsByFaculty = new Map<number, ReviewRow[]>();
-  for (const r of reviewRows as ReviewRow[]) {
-    if (!reviewsByFaculty.has(r.faculty_id)) reviewsByFaculty.set(r.faculty_id, []);
-    reviewsByFaculty.get(r.faculty_id)!.push(r);
-  }
-  const vitfacByEmp = new Map<string, { row: FacultyRow; agg: ReturnType<typeof aggregateReviews> }>();
-  for (const f of facultyRows as FacultyRow[]) {
-    const revs = reviewsByFaculty.get(f.id) || [];
-    vitfacByEmp.set(String(f.employee_id), { row: f, agg: aggregateReviews(revs) });
+  const vitfacByEmp = new Map<string, VitfacFaculty>();
+  for (const f of vitfacList) {
+    vitfacByEmp.set(String(f.employeeId), f);
   }
 
   return roster.map((r) => {
     const v = vitfacByEmp.get(r.employeeId);
-    const agg = v?.agg;
-    const f = v?.row;
     return {
       employeeId: r.employeeId,
       name: r.name,
@@ -500,66 +340,54 @@ async function buildCombinedCatalog(env: Env, ctx?: ExecutionContext): Promise<a
       wpUrl: r.wpUrl,
       featuredMedia: r.featuredMedia,
       // vitfac
-      vitfacAvailable: !!v,
-      designation: f?.designation || null,
-      dept: f?.school_page || f?.campus || null,
-      campus: f?.campus || null,
-      image_url: toCdnUrl(env, f?.image_url),
-      wPct: agg?.wPct ?? 0,
-      reviews: agg?.total ?? 0,
-      wCount: agg?.wCount ?? 0,
-      lCount: agg?.lCount ?? 0,
-      metrics: agg?.metrics ?? null,
-      lore: agg?.lore ?? null,
-      courses: agg?.courses ?? [],
+      vitfacAvailable: !!v && v.reviews > 0,
+      designation: v?.designation || null,
+      dept: v?.dept || r.school || null,
+      campus: v?.dept || null,
+      image_url: toCdnUrl(env, v?.image_url, r.employeeId),
+      imageUrl: toCdnUrl(env, v?.image_url, r.employeeId),
+      wPct: v?.wPct ?? 0,
+      reviews: v?.reviews ?? 0,
+      wCount: v?.wCount ?? 0,
+      lCount: v?.lCount ?? 0,
+      metrics: v?.metrics ?? null,
+      lore: v?.lore ?? null,
+      courses: v?.courses ?? [],
     };
   });
 }
 
 async function buildCombinedProfile(env: Env, empId: string): Promise<any | null> {
-  let f: FacultyRow | null = null;
-  let reviews: ReviewRow[] = [];
+  let f: VitfacFaculty | null = null;
   try {
-    const fRows = await supabaseFetch(
-      env,
-      "faculty",
-      "id,employee_id,name,designation,image_url,school_page,campus",
-      `&employee_id=eq.${encodeURIComponent(empId)}`
-    );
-    f = (fRows as FacultyRow[])[0] || null;
-    if (f) {
-      reviews = (await supabaseFetch(
-        env,
-        "reviews",
-        "score_lecture,score_da,score_vibe,verdict,lore_chips,course_code",
-        `&faculty_id=eq.${f.id}`
-      )) as ReviewRow[];
-    }
+    const list = ((await env.CACHE.get("faculty_list_v1", "json")) as VitfacFaculty[]) || [];
+    f = list.find((item) => item.employeeId === empId || item.id === encodeB64(empId)) || null;
   } catch {
-    // Supabase down — continue with directorycc only
+    // ignore
   }
 
-  const vitfacAgg = reviews.length ? aggregateReviews(reviews) : null;
   const dir = await fetchDirectoryProfile(empId, env);
 
   if (!f && !dir) return null;
+
+  const cdnImg = toCdnUrl(env, null, empId);
 
   const prof: any = {
     employeeId: empId,
     name: dir?.name || f?.name || null,
     designation: dir?.designation || f?.designation || null,
-    dept: f?.school_page || f?.campus || null,
-    campus: f?.campus || null,
-    schoolPage: f?.school_page || null,
-    image: dir?.image || null,
-    imageUrl: toCdnUrl(env, f?.image_url),
+    dept: f?.dept || null,
+    campus: "Chennai",
+    schoolPage: null,
+    image: null, // NO base64 bloat! Served directly via cdn.amazecc.com
+    imageUrl: cdnImg,
     email: dir?.email || null,
     intercom: dir?.intercom || null,
     phd: dir?.phd || null,
     researchArea: dir?.researchArea || [],
     areasOfSpecialization: dir?.areasOfSpecialization || [],
     links: dir?.links || null,
-    metrics: { ...(vitfacAgg?.metrics || {}), ...(dir?.metrics || {}) },
+    metrics: { ...(f?.metrics || {}), ...(dir?.metrics || {}) },
     hIndexScopus: dir?.metrics?.hIndexScopus ?? null,
     i10Index: dir?.metrics?.i10Index ?? null,
     education: dir?.education || [],
@@ -571,36 +399,26 @@ async function buildCombinedProfile(env: Env, empId: string): Promise<any | null
     patentsPublished: dir?.patentsPublished || [],
     collaborations: dir?.collaborations || [],
     otherDetails: dir?.otherDetails || [],
-    wPct: vitfacAgg?.wPct ?? 0,
-    reviews: vitfacAgg?.total ?? 0,
-    wCount: vitfacAgg?.wCount ?? 0,
-    lCount: vitfacAgg?.lCount ?? 0,
-    vitfacMetrics: vitfacAgg?.metrics || null,
-    lore: vitfacAgg?.lore || null,
-    courses: vitfacAgg?.courses || [],
+    wPct: f?.wPct ?? 0,
+    reviews: f?.reviews ?? 0,
+    wCount: f?.wCount ?? 0,
+    lCount: f?.lCount ?? 0,
+    vitfacMetrics: f?.metrics || null,
+    lore: f?.lore || null,
+    courses: f?.courses || [],
     directoryAvailable: !!dir,
-    vitfacAvailable: !!f,
+    vitfacAvailable: !!f && f.reviews > 0,
   };
 
   const courseStatsCourses = f
-    ? Array.from(
-        new Map(
-          (reviews as ReviewRow[])
-            .filter((r) => r.course_code)
-            .map((r) => [r.course_code, r])
-        ).keys()
-      ).map((code) => {
-        const revs = (reviews as ReviewRow[]).filter((r) => r.course_code === code);
-        const agg = aggregateReviews(revs);
-        return {
-          code,
-          name: undefined,
-          reviews: agg.total,
-          wPct: agg.wPct,
-          metrics: agg.metrics,
-          lore: agg.lore,
-        };
-      })
+    ? (f.courses || []).map((code) => ({
+        code,
+        name: undefined,
+        reviews: 0,
+        wPct: f.wPct,
+        metrics: f.metrics,
+        lore: f.lore,
+      }))
     : [];
 
   return {
@@ -617,8 +435,9 @@ async function buildCombinedProfile(env: Env, empId: string): Promise<any | null
       lCount: prof.lCount,
       metrics: prof.vitfacMetrics || undefined,
       lore: prof.lore,
-      image_url: toCdnUrl(env, prof.imageUrl),
-      image: prof.image || null,
+      image_url: cdnImg,
+      imageUrl: cdnImg,
+      image: null,
       email: prof.email,
       intercom: prof.intercom,
       profileUrl: null,
@@ -632,10 +451,10 @@ async function buildCombinedProfile(env: Env, empId: string): Promise<any | null
     courseStats: f
       ? {
           global: {
-            reviews: vitfacAgg?.total ?? 0,
-            wPct: vitfacAgg?.wPct ?? 0,
-            metrics: vitfacAgg?.metrics,
-            lore: vitfacAgg?.lore,
+            reviews: f.reviews,
+            wPct: f.wPct,
+            metrics: f.metrics,
+            lore: f.lore,
           },
           courses: courseStatsCourses,
         }
@@ -646,7 +465,8 @@ async function buildCombinedProfile(env: Env, empId: string): Promise<any | null
       designation: prof.designation,
       email: prof.email,
       intercom: prof.intercom,
-      image: prof.image,
+      image: null,
+      imageUrl: cdnImg,
       phd: prof.phd,
       researchArea: prof.researchArea,
       areasOfSpecialization: prof.areasOfSpecialization,
@@ -790,7 +610,7 @@ async function cachedProxy(
       Promise.all([
         env.CACHE.put(key, body, { expirationTtl: staleTtlSeconds }),
         env.CACHE.put(`${key}:fresh`, "1", { expirationTtl: freshTtlSeconds }),
-      ])
+      ]).catch(() => {})
     );
     return proxied(body, "upstream-fresh", freshTtlSeconds);
   } catch (err) {
@@ -894,13 +714,7 @@ async function handleRoute(url: URL, env: Env, ctx: ExecutionContext): Promise<R
       const cacheKey = "faculty_list_v1";
       const cached = await env.CACHE.get(cacheKey, "json");
       if (cached) return json({ data: { faculty: cached }, cached: true, source: "kv-cache" });
-      try {
-        const faculty = await buildCatalog(env);
-        ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(faculty), { expirationTtl: ttl }));
-        return json({ data: { faculty }, cached: false, source: "supabase-fresh" });
-      } catch (err) {
-        return json({ error: String(err) }, 502);
-      }
+      return json({ error: "Faculty catalog not found in cache" }, 404);
     }
 
     // ---- schools (derived from roster) ----
@@ -972,7 +786,7 @@ async function handleRoute(url: URL, env: Env, ctx: ExecutionContext): Promise<R
         if (!bundle) return json({ data: null }, 404);
         // Only cache when we actually got something useful; short TTL if directorycc was down
         const ttlToUse = bundle.directory?.available ? rosterTtl : ttl;
-        ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(bundle), { expirationTtl: ttlToUse }));
+        ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(bundle), { expirationTtl: ttlToUse }).catch(() => {}));
         return json({ data: bundle, cached: false, source: "fresh" });
       } catch (err) {
         return json({ error: String(err) }, 502);
@@ -990,8 +804,8 @@ async function handleRoute(url: URL, env: Env, ctx: ExecutionContext): Promise<R
       try {
         const bundle = await buildProfile(env, empId);
         if (!bundle) return json({ data: null }, 404);
-        ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(bundle), { expirationTtl: ttl }));
-        return json({ data: bundle, cached: false, source: "supabase-fresh" });
+        ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(bundle), { expirationTtl: ttl }).catch(() => {}));
+        return json({ data: bundle, cached: false, source: "kv-catalog" });
       } catch (err) {
         return json({ error: String(err) }, 502);
       }
@@ -1004,7 +818,7 @@ async function handleRoute(url: URL, env: Env, ctx: ExecutionContext): Promise<R
       if (cached) return json({ data: { faculty: cached }, cached: true, source: "kv-cache" });
       try {
         const combined = await buildCombinedCatalog(env, ctx);
-        ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(combined), { expirationTtl: rosterTtl }));
+        ctx.waitUntil(env.CACHE.put(cacheKey, JSON.stringify(combined), { expirationTtl: rosterTtl }).catch(() => {}));
         return json({ data: { faculty: combined }, cached: false, source: "fresh" });
       } catch (err) {
         return json({ error: String(err) }, 502);

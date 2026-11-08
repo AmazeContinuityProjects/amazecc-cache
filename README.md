@@ -67,6 +67,26 @@ The app therefore falls back to fetching chennai directly when this route
 errors — see `resolveChennaiImageUrl` in `AmazeCC/src/lib/vitfacService.ts`.
 That fallback is load-bearing; do not remove it.
 
+## Catalog & Profile Pre-caching
+
+Because upstream origins (`vitc-faculty.vercel.app` and `directorycc.vit.ac.in`) either change infrequently or suffer from TLS/availability issues, offline sync scripts build and push KV keys:
+
+### 1. Vitfac Review Catalog (`faculty_list_v1`)
+```sh
+node scripts/build-vitcfac-catalog.mjs > /tmp/faculty_list_v1.json
+npx wrangler kv key put faculty_list_v1 --path /tmp/faculty_list_v1.json --namespace-id 3cf003b8421b4de0a8bc54776f1df337 --remote
+```
+
+### 2. DirectoryCC Faculty Profiles (`directory_profile_<empId>_v1`)
+Fetches faculty profiles (including base64 photos, publications, research areas, and links) from `directorycc.vit.ac.in` and uploads them to KV:
+```sh
+# Dry-run test
+node scripts/build-directory-profiles.mjs --limit 10
+
+# Extract all faculty profiles and upload to KV
+node scripts/build-directory-profiles.mjs --upload
+```
+
 ## Deploy
 
 ```sh

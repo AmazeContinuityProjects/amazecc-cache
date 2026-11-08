@@ -9,6 +9,7 @@ wrangler.toml
 
 # Build & generated types
 dist/
+.cache/
 worker-configuration.d.ts
 
 # Secrets and local environment files
